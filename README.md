@@ -46,9 +46,9 @@ env config, and a **stubbed skill module**. Build the skill.
 
    | Classification | Action |
    |---|---|
-   | `billing` | draft a reply (`POST /mail/send`) |
-   | `bug_report` | draft a reply (`POST /mail/send`) |
-   | `sales_lead` | draft a reply **and** create a CRM lead (`POST /crm/lead`) |
+   | `billing` | draft a reply to the customer (`POST /mail/send`) |
+   | `bug_report` | alert the engineering team (`POST /slack/alert`, channel `#engineering`) |
+   | `sales_lead` | draft a reply **and** create a CRM lead (`POST /mail/send`, `POST /crm/lead`) |
    | `spam` | no action — log and drop |
 
 4. **Human-in-the-loop gate.** *No external action (send reply, create CRM record) may
@@ -65,7 +65,7 @@ env config, and a **stubbed skill module**. Build the skill.
 ## What we hand you
 
 ```
-mock_api/server.py     FastAPI mock: /inbox, /mail/send, /crm/lead
+mock_api/server.py     FastAPI mock: /inbox, /mail/send, /slack/alert, /crm/lead
 fixtures/emails.json   the inbox the agent triages
 src/triage_skill.py    STUB — signatures + TODOs, no logic. This is where you work.
 env.example            the env vars you need (copy to .env)

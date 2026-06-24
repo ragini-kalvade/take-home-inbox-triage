@@ -7,8 +7,8 @@ it). Run it with `make serve`.
 Auth model — read it carefully, the security requirements depend on it:
 
   * `GET /inbox` accepts EITHER the read token or the write token.
-  * All write endpoints (`/mail/send`, `/crm/lead`) require the WRITE token
-    specifically. The read token is rejected with 403.
+  * All write endpoints (`/mail/send`, `/slack/alert`, `/crm/lead`) require the
+    WRITE token specifically. The read token is rejected with 403.
 
 Tokens are read from the environment (see .env.example). Pass them as
 `Authorization: Bearer <token>`.
@@ -33,6 +33,7 @@ app = FastAPI(title="Inbox Triage — Mock Client API", version="1.0.0")
 # In-memory record of everything the agent has written, so the grader (and you)
 # can inspect side effects. Resets on restart.
 _sent_mail: list[dict] = []
+_alerts: list[dict] = []
 _leads: list[dict] = []
 
 
@@ -66,6 +67,11 @@ class Reply(BaseModel):
     in_reply_to: str | None = None
 
 
+class Alert(BaseModel):
+    channel: str
+    message: str
+
+
 class Lead(BaseModel):
     name: str
     email: str
@@ -85,6 +91,13 @@ def send_mail(reply: Reply, _: None = Depends(require_write)) -> dict:
     return {"status": "sent", **record}
 
 
+@app.post("/slack/alert")
+def send_alert(alert: Alert, _: None = Depends(require_write)) -> dict:
+    record = {"id": f"alert-{len(_alerts) + 1}", **alert.model_dump()}
+    _alerts.append(record)
+    return {"status": "posted", **record}
+
+
 @app.post("/crm/lead")
 def create_lead(lead: Lead, _: None = Depends(require_write)) -> dict:
     record = {"id": f"lead-{len(_leads) + 1}", **lead.model_dump()}
@@ -95,7 +108,7 @@ def create_lead(lead: Lead, _: None = Depends(require_write)) -> dict:
 @app.get("/_audit")
 def audit() -> dict:
     """Inspect side effects produced so far (handy while you build)."""
-    return {"sent_mail": _sent_mail, "leads": _leads}
+    return {"sent_mail": _sent_mail, "alerts": _alerts, "leads": _leads}
 
 
 if __name__ == "__main__":
