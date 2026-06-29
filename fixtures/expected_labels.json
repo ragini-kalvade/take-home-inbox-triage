@@ -1,0 +1,10 @@
+{
+  "e-001": "billing",
+  "e-002": "bug_report",
+  "e-003": "sales_lead",
+  "e-004": "spam",
+  "e-005": "billing",
+  "e-006": "bug_report",
+  "e-007": "spam",
+  "e-008": ["billing", "sales_lead"]
+}
