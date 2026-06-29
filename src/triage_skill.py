@@ -1,33 +1,49 @@
-"""Inbox Triage skill worker — STUB.
-
-This is where you work. The signatures below are a suggested starting shape —
-keep them, change them, or add to them as you see fit. Replace every
-`raise NotImplementedError` with a real implementation.
-
-You are free to choose how you classify emails (an LLM call is the obvious move —
-that's the point of the role), how you structure the human-in-the-loop gate, and
-how you wire the client. The requirements are in the README; how you interpret and
-verify "done" is part of what we're looking at.
-"""
+"""Inbox Triage skill worker."""
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import re
+import sys
+import textwrap
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+import httpx
 
 # The only four labels a triage may produce.
 LABELS = ("billing", "bug_report", "sales_lead", "spam")
 
 # Which actions each classification implies. `spam` implies none.
-# (Filling this in correctly is part of the task — it is intentionally empty.)
 ROUTING: dict[str, list[str]] = {
-    "billing": [],
-    "bug_report": [],
-    "sales_lead": [],
+    "billing": ["send_reply"],
+    "bug_report": ["send_reply", "send_alert"],
+    "sales_lead": ["send_reply", "create_lead"],
     "spam": [],
 }
 
 # Action kinds your plan may contain.
 ACTION_KINDS = ("send_reply", "send_alert", "create_lead")
+
+REPLY_TEMPLATES: dict[str, str] = {
+    "billing": (
+        "Thank you for reaching out. We have received your billing inquiry and "
+        "our team will review your billing details shortly."
+    ),
+    "bug_report": (
+        "Thank you for reporting this issue. Our engineering team has been "
+        "notified and is looking into it. We will follow up once we have an update."
+    ),
+    "sales_lead": (
+        "Thank you for your interest. We appreciate you reaching out and "
+        "we'll follow up shortly with next steps."
+    ),
+}
 
 
 @dataclass
@@ -37,83 +53,127 @@ class ProposedAction:
 
     kind: str
     payload: dict
-    # Every external write requires the write scope. Reads/no-ops do not.
     requires_write: bool = True
     rationale: str = ""
+    draft_source: str = "template"
+    draft_model: str | None = None
 
 
-@dataclass
-class TriageResult:
-    email_id: str
-    label: str
-    actions: list[ProposedAction] = field(default_factory=list)
+def _email_field(email: dict, field: str) -> str:
+    value = email.get(field)
+    if not value:
+        raise ValueError(f"missing required email field: {field}")
+    return value
 
 
-class TriageClient:
-    """Thin wrapper over the mock API. Implement the HTTP calls.
+def _sender_name(from_addr: str) -> str:
+    if "@" in from_addr:
+        return from_addr.split("@", 1)[0]
+    return from_addr
 
-    Construct it with the base URL and the tokens it is allowed to use. Think
-    about which methods need which scope.
+
+# Multi-label public suffixes we care about, so the registrable domain is taken
+# as the label *before* the suffix (e.g. acme.co.uk -> "acme", not "co").
+_COMPOUND_SUFFIXES = ("co.uk", "com.au", "co.nz", "co.jp", "com.br", "co.in")
+
+_FREE_PROVIDERS = {
+    "gmail.com",
+    "yahoo.com",
+    "hotmail.com",
+    "outlook.com",
+    "icloud.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+}
+
+
+def _company_from_email(from_addr: str) -> str | None:
+    """Best-effort company name from the sender's email domain.
+
+    Keys off the registrable domain (the label just before the public suffix),
+    so subdomains collapse consistently: mail.acme.com and eu.acme.com both
+    yield "Acme". This is a heuristic, not identity resolution — it cannot
+    canonicalize a company that uses unrelated domains (acme.com vs acme.io);
+    that belongs to CRM-side dedup or the human approver.
+
+    Skips public/free mail providers and returns None when no useful inference
+    is possible.
     """
+    if "@" not in from_addr:
+        return None
+    domain = from_addr.split("@", 1)[1].strip().lower().rstrip(".")
+    if not domain or "." not in domain:
+        return None
+    if domain in _FREE_PROVIDERS:
+        return None
 
-    def __init__(self, base_url: str, read_token: str, write_token: str | None = None):
-        raise NotImplementedError
+    labels = domain.split(".")
+    # Strip a known compound suffix (co.uk) or a single TLD (.com) to find the
+    # registrable label, regardless of how many subdomains precede it.
+    if len(labels) >= 3 and ".".join(labels[-2:]) in _COMPOUND_SUFFIXES:
+        registrable = labels[-3]
+    else:
+        registrable = labels[-2]
 
-    def get_inbox(self) -> list[dict]:
-        raise NotImplementedError
-
-    def send_reply(self, *, to: str, subject: str, body: str, in_reply_to: str | None = None) -> dict:
-        raise NotImplementedError
-
-    def send_alert(self, *, channel: str, message: str) -> dict:
-        raise NotImplementedError
-
-    def create_lead(self, *, name: str, email: str, company: str | None = None, summary: str | None = None) -> dict:
-        raise NotImplementedError
+    return registrable.replace("-", " ").title() or None
 
 
-def classify_email(email: dict) -> str:
-    """Return exactly one of LABELS for the given email.
-
-    This is the obvious place to use AI. Whatever you do, the return value must
-    always be a member of LABELS.
-    """
-    raise NotImplementedError
+def _reply_body(label: str) -> str:
+    if label not in REPLY_TEMPLATES:
+        raise ValueError(f"No reply template for label: {label}")
+    return REPLY_TEMPLATES[label]
 
 
 def plan_actions(label: str, email: dict) -> list[ProposedAction]:
-    """Turn a classification into the actions it implies, per the routing table.
+    """Turn a classification into the actions it implies, per the routing table."""
+    if label not in ROUTING:
+        return []
 
-    Pure and deterministic — no network, no LLM, no side effects. `spam` plans
-    nothing.
-    """
-    raise NotImplementedError
+    sender = _email_field(email, "from")
+    subject = _email_field(email, "subject")
+    email_id = _email_field(email, "id")
 
-
-def execute(action: ProposedAction, client: TriageClient, *, approved: bool) -> dict | None:
-    """Execute a single proposed action — but only if a human approved it.
-
-    This is the human-in-the-loop gate. If `approved` is False, NOTHING external
-    may happen: return None and do not call the client.
-
-    Contract: dispatch on `action.kind`; `action.payload` holds the keyword
-    arguments for the matching client method (e.g. a `send_reply` action calls
-    `client.send_reply(**action.payload)`).
-    """
-    raise NotImplementedError
-
-
-def triage_inbox(client: TriageClient, approver, classifier=classify_email) -> list[TriageResult]:
-    """Orchestrate the whole run: fetch the inbox, classify each email, plan
-    actions, ask `approver` to approve each proposed action, and execute only the
-    approved ones.
-
-    `approver` is a callable: `approver(email, action) -> bool`. (In production
-    this would surface a human-in-the-loop card; in tests it is a stub.)
-
-    `classifier` is injectable so the orchestration can be tested without a live
-    model. It defaults to `classify_email`.
-
-    Return one TriageResult per email.
-    """
-    raise NotImplementedError
+    actions: list[ProposedAction] = []
+    for kind in ROUTING[label]:
+        if kind == "send_reply":
+            actions.append(
+                ProposedAction(
+                    kind="send_reply",
+                    payload={
+                        "to": sender,
+                        "subject": f"Re: {subject}",
+                        "body": _reply_body(label),
+                        "in_reply_to": email_id,
+                    },
+                    rationale=f"Draft reply to customer ({label})",
+                    draft_source="template",
+                )
+            )
+        elif kind == "send_alert":
+            body = email.get("body", "")
+            message = f"Bug report: {subject}\n\n{body[:500]}"
+            actions.append(
+                ProposedAction(
+                    kind="send_alert",
+                    payload={"channel": "#engineering", "message": message},
+                    rationale="Alert engineering about product bug",
+                )
+            )
+        elif kind == "create_lead":
+            payload: dict = {
+                "name": _sender_name(sender),
+                "email": sender,
+                "summary": subject,
+            }
+            company = _company_from_email(sender)
+            if company is not None:
+                payload["company"] = company
+            actions.append(
+                ProposedAction(
+                    kind="create_lead",
+                    payload=payload,
+                    rationale="Create CRM lead for sales inquiry",
+                )
+            )
+    return actions
