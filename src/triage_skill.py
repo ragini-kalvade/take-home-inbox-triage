@@ -76,6 +76,37 @@ class ProposedAction:
     draft_model: str | None = None
 
 
+@dataclass(frozen=True)
+class ApprovalDecision:
+    approved: bool
+    final_body: str | None = None
+    review_seconds: float = 0.0
+
+
+@dataclass
+class ActionOutcome:
+    kind: str
+    approved: bool = False
+    edited: bool = False
+    edit_distance: int = 0
+    review_seconds: float = 0.0
+    executed: bool = False
+    error: str | None = None
+
+
+@dataclass
+class TriageResult:
+    email_id: str
+    label: str
+    actions: list[ProposedAction] = field(default_factory=list)
+    classification_error: bool = False
+    skipped: list[str] = field(default_factory=list)
+    approved: list[str] = field(default_factory=list)
+    executed: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    outcomes: list[ActionOutcome] = field(default_factory=list)
+
+
 class TriageClient:
     """Thin wrapper over the mock API."""
 
@@ -368,6 +399,12 @@ def _reply_body(label: str) -> str:
     return REPLY_TEMPLATES[label]
 
 
+def _coerce_approval(decision: bool | ApprovalDecision) -> ApprovalDecision:
+    if isinstance(decision, ApprovalDecision):
+        return decision
+    return ApprovalDecision(approved=bool(decision))
+
+
 def plan_actions(label: str, email: dict) -> list[ProposedAction]:
     """Turn a classification into the actions it implies, per the routing table."""
     if label not in ROUTING:
@@ -420,3 +457,174 @@ def plan_actions(label: str, email: dict) -> list[ProposedAction]:
                 )
             )
     return actions
+
+
+def execute(
+    action: ProposedAction,
+    *,
+    base_url: str,
+    write_token_provider: Callable[[], str],
+    approved: bool,
+    read_token: str,
+) -> dict | None:
+    """Execute a single proposed action — but only if a human approved it."""
+    if not approved:
+        return None
+
+    write_token = write_token_provider()
+    write_client = TriageClient(base_url, read_token=read_token, write_token=write_token)
+    try:
+        if action.kind == "send_reply":
+            return write_client.send_reply(**action.payload)
+        if action.kind == "send_alert":
+            return write_client.send_alert(**action.payload)
+        if action.kind == "create_lead":
+            return write_client.create_lead(**action.payload)
+        raise ValueError(f"Unknown action kind: {action.kind}")
+    finally:
+        write_client.close()
+
+
+def _resolve_classification(email: dict, classifier: Callable[[dict], str]) -> Classification:
+    if classifier is classify_email:
+        return _classify(email)
+    try:
+        label = classifier(email)
+        if label not in LABELS:
+            return Classification(label="spam", error=True)
+        return Classification(label=label, error=False)
+    except Exception:
+        return Classification(label="spam", error=True)
+
+
+def triage_inbox(
+    client: TriageClient,
+    approver: Callable[[dict, ProposedAction], bool | ApprovalDecision] | None,
+    classifier: Callable[[dict], str] = classify_email,
+    *,
+    mode: Literal["propose", "approve"] = "propose",
+    base_url: str | None = None,
+    write_token_provider: Callable[[], str] | None = None,
+) -> list[TriageResult]:
+    """Orchestrate the whole run: fetch, classify, plan, approve, execute."""
+    if mode not in ("propose", "approve"):
+        raise ValueError(f"Unknown mode: {mode}")
+
+    # Fall back to the client's configured base_url when not given explicitly,
+    # so stub-style calls like triage_inbox(client, approver, classifier) work.
+    base_url = base_url or client.base_url
+
+    emails = client.get_inbox()
+    results: list[TriageResult] = []
+    seen_ids: set[str] = set()
+
+    for email in emails:
+        email_id = email.get("id", "unknown")
+        if email_id in seen_ids:
+            log_event(email_id, "skip", "duplicate_id")
+            continue
+        seen_ids.add(email_id)
+
+        try:
+            classification = _resolve_classification(email, classifier)
+            label = classification.label
+            actions = plan_actions(label, email)
+            result = TriageResult(
+                email_id=email_id,
+                label=label,
+                actions=actions,
+                classification_error=classification.error,
+            )
+
+            log_event(email_id, "classified", f"label={label} error={classification.error}")
+            if label == "spam":
+                log_event(email_id, "drop", "spam — no actions")
+                results.append(result)
+                continue
+
+            for action in actions:
+                log_event(email_id, "propose", f"kind={action.kind} rationale={action.rationale}")
+
+            _print_email_review(
+                email,
+                label,
+                actions,
+                classification_error=classification.error,
+            )
+
+            if mode == "propose":
+                results.append(result)
+                continue
+
+            if approver is None or write_token_provider is None:
+                result.errors.append("approve mode requires approver and write_token_provider")
+                results.append(result)
+                continue
+
+            read_token = client.read_token
+            for i, action in enumerate(actions, 1):
+                if len(actions) > 1:
+                    print(f"\n  — action {i}/{len(actions)} —")
+                outcome = ActionOutcome(kind=action.kind)
+                try:
+                    decision = _coerce_approval(approver(email, action))
+                    outcome.review_seconds = decision.review_seconds
+                except Exception as exc:
+                    result.errors.append(f"approver failed for {action.kind}: {exc}")
+                    result.skipped.append(action.kind)
+                    result.outcomes.append(outcome)
+                    continue
+
+                if not decision.approved:
+                    log_event(email_id, "denied", f"kind={action.kind}")
+                    result.skipped.append(action.kind)
+                    result.outcomes.append(outcome)
+                    continue
+
+                original_body = (
+                    action.payload.get("body", "")
+                    if action.kind == "send_reply"
+                    else ""
+                )
+                if decision.final_body and action.kind == "send_reply":
+                    action.payload["body"] = decision.final_body
+                    outcome.edited = decision.final_body != original_body
+                    outcome.edit_distance = _edit_distance(
+                        original_body, decision.final_body
+                    )
+
+                log_event(email_id, "approved", f"kind={action.kind}")
+                result.approved.append(action.kind)
+                outcome.approved = True
+                try:
+                    response = execute(
+                        action,
+                        base_url=base_url,
+                        write_token_provider=write_token_provider,
+                        approved=True,
+                        read_token=read_token,
+                    )
+                    if response is not None:
+                        result.executed.append(response)
+                        outcome.executed = True
+                        log_event(email_id, "executed", f"kind={action.kind}")
+                except Exception as exc:
+                    msg = f"{action.kind} failed: {exc}"
+                    result.errors.append(msg)
+                    outcome.error = msg
+                    log_event(email_id, "error", msg)
+                result.outcomes.append(outcome)
+
+            results.append(result)
+        except Exception as exc:
+            log_event(email_id, "error", f"email processing failed: {exc}")
+            results.append(
+                TriageResult(
+                    email_id=email_id,
+                    label="spam",
+                    classification_error=True,
+                    errors=[str(exc)],
+                )
+            )
+
+    return results
