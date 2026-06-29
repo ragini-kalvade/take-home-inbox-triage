@@ -67,7 +67,7 @@ env config, and a **stubbed skill module**. Build the skill.
 ```
 mock_api/server.py     FastAPI mock: /inbox, /mail/send, /slack/alert, /crm/lead
 fixtures/emails.json   the inbox the agent triages
-src/triage_skill.py    STUB — signatures + TODOs, no logic. This is where you work.
+src/triage_skill.py    inbox triage skill (classify, route, propose/approve)
 env.example            the env vars you need (copy to .env)
 Makefile               `make serve` (run the API), `make audit` (inspect side effects)
 ENGINEERING_LOG.md     a one-page template — fill it in
@@ -103,3 +103,77 @@ Questions before you start? Email us. Once you open the scaffold, the clock is y
 ---
 
 <!-- ↓↓↓ CANDIDATE: add your "README the client could read" section here ↓↓↓ -->
+
+## Inbox Triage Skill — What We Built
+
+This skill reads your incoming customer emails, classifies each one, and **proposes** the right next actions — reply, engineering alert, or CRM lead — so your team never starts from a blank page.
+
+The skill **drafts/proposes** replies locally using safe templates. The mock send endpoint (`POST /mail/send`) is called **only after you explicitly approve** each action.
+
+### How it works
+
+1. **Ingest** — fetches all emails from the mock inbox (`GET /inbox`).
+2. **Classify** — uses the configured LLM provider to assign each email one label: `billing`, `bug_report`, `sales_lead`, or `spam`.
+3. **Plan** — deterministic Python routing decides what to do (the LLM never picks endpoints). Bug reports trigger a customer acknowledgment **and** an engineering alert; spam is logged and dropped with no reply template.
+4. **Propose or approve** — by default the skill prints proposed actions only. With `--approve`, you confirm each action individually before anything is sent.
+5. **Execute** — approved actions call the write API (mail, Slack alert, or CRM lead).
+
+### How to run
+
+```bash
+cp env.example .env          # add your LLM key
+make serve                   # terminal 1 — mock API on :8099
+python -m src.triage_skill    # propose-only; no writes
+python -m src.triage_skill --approve   # per-action y/n prompts; writes after approval
+make audit                   # inspect side effects
+```
+
+**LLM provider.** Defaults to Anthropic — set `ANTHROPIC_API_KEY`. For Groq
+instead, set `LLM_PROVIDER=groq` and `GROQ_API_KEY` (optional `GROQ_MODEL`,
+default `llama-3.1-8b-instant`). Groq has a no-card free tier, handy for a
+live demo.
+
+Classification is the only LLM call, so the provider swap is fully contained.
+
+**No key? Verify offline.** `pytest -v` mocks the LLM and HTTP client, so the
+routing, approval gate, and least-privilege logic are verified with no API key
+and no server. See `TEST_REPORT.md` for a captured run.
+
+**Propose-only (default):** loads `API_BASE_URL`, `READ_TOKEN`, and the selected LLM key only. `WRITE_TOKEN` is never read.
+
+**Approve mode:** `WRITE_TOKEN` is accessed only when you approve a specific action — spam and denied actions never touch it.
+
+### Verify it works
+
+1. Run propose-only and confirm `make audit` shows empty side effects.
+2. Run with `--approve`, approve a billing reply and a bug alert, then `make audit` to confirm entries appeared.
+3. Run `make test` (or `pytest -v`) for automated checks — mocked, no live API
+   or LLM required.
+
+### Run metrics
+
+Every run prints a **Run metrics** summary at the end so you can see how the
+agent performed without digging through logs.
+
+| Section | What it tells you |
+|---------|-------------------|
+| **Classification** | Label accuracy vs gold fixtures, spam false positives/negatives, whether prompt-injection mail (e-007) was caught |
+| **Human gate** | Approval rate, approval without edit (draft good enough as-is), denial rate by action type, average review time |
+| **Safety** | Write-token accesses vs actions executed, writes on spam (should be 0), whether security invariants passed |
+| **Funnel** | Execution success rate, partial completion (e.g. reply approved but CRM lead skipped), errors by endpoint |
+| **Draft quality** | Draft pass rate (non-empty, label-relevant, safe, right length) and draft source (`template` today; LLM in a future version) |
+
+In **propose-only** mode you get classification and draft-quality metrics with
+no writes. In **`--approve`** mode you also get human-gate, safety, and funnel
+stats — including whether write credentials were used only for approved actions.
+
+Offline tests in `TEST_REPORT.md` cover the same metric aggregators with no API
+key required.
+
+### Classification fallback tradeoff
+
+If the LLM fails or returns invalid output, the email is classified as `spam` with `classification_error=True` and logged loudly. This is **safe** (no writes on uncertain mail) but may **drop legitimate email** — a deliberate fail-safe for a triage agent with write access.
+
+### Design decision I'm proudest of
+
+I separated proposed actions from executed actions. The LLM classifies; deterministic code enforces routing, template replies, per-action approval, and credential use. `WRITE_TOKEN` is accessed only inside `execute` after approval — spam and denied actions never touch it.
