@@ -4,6 +4,5 @@ httpx>=0.27
 pytest>=8.0
 python-dotenv>=1.0
 
-# LLM SDK — Anthropic is here as a convenience. You may swap in openai, or any
-# other provider's SDK; the task does not require a specific model vendor.
+# LLM SDK — Anthropic (default). Groq uses httpx only (no extra package).
 anthropic>=0.40

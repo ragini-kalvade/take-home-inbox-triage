@@ -954,3 +954,266 @@ def triage_inbox(
             )
 
     return results
+
+
+def _body_snippet(body: str, limit: int = 200) -> str:
+    text = " ".join((body or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _print_email_review(
+    email: dict,
+    label: str,
+    actions: list[ProposedAction],
+    *,
+    classification_error: bool,
+) -> None:
+    """Show email context once before the per-action approval prompts."""
+    print("\n" + "─" * 60)
+    print(f"Email {email.get('id', '?')} — {email.get('subject', '(no subject)')}")
+    print(f"  From  : {email.get('from', '(unknown)')}")
+    print(f"  Label : {label}")
+    if classification_error:
+        print(
+            "  ⚠ Classification error — LLM failed or returned invalid output; "
+            "using spam-safe fallback"
+        )
+    snippet = _body_snippet(email.get("body", ""))
+    if snippet:
+        print(f"  Body  : {snippet}")
+    if actions:
+        kinds = ", ".join(a.kind for a in actions)
+        print(f"  Proposed: {kinds}")
+        for action in actions:
+            if action.kind == "send_reply":
+                body = action.payload.get("body", "")
+                if body:
+                    print("  Draft reply preview:")
+                    print(textwrap.indent(_body_snippet(body, limit=280), "    "))
+    print("─" * 60)
+
+
+def _cli_approver(email: dict, action: ProposedAction) -> ApprovalDecision:
+    print(f"\n  Action: {action.kind}")
+    print(f"  Rationale: {action.rationale}")
+    if action.kind == "send_reply":
+        print(f"  To: {action.payload.get('to')}")
+        print(f"  Subject: {action.payload.get('subject')}")
+        body = action.payload.get("body", "")
+        if body:
+            print("  Draft body:")
+            print(textwrap.indent(body, "    "))
+    elif action.kind == "send_alert":
+        print(f"  Channel: {action.payload.get('channel')}")
+        message = action.payload.get("message", "")
+        if message:
+            print("  Message:")
+            print(textwrap.indent(_body_snippet(message, limit=300), "    "))
+    elif action.kind == "create_lead":
+        print(f"  Lead: {action.payload.get('name')} <{action.payload.get('email')}>")
+        if action.payload.get("company"):
+            print(f"  Company: {action.payload.get('company')}")
+    started = time.perf_counter()
+    try:
+        answer = input("  Approve this action? [y/N/e]: ").strip().lower()
+    except EOFError:
+        answer = ""
+    review_seconds = time.perf_counter() - started
+
+    if answer in ("y", "yes"):
+        return ApprovalDecision(approved=True, review_seconds=review_seconds)
+
+    if answer == "e" and action.kind == "send_reply":
+        try:
+            new_body = input("  New reply body (empty=cancel edit): ").strip()
+        except EOFError:
+            new_body = ""
+        if new_body:
+            return ApprovalDecision(
+                approved=True,
+                final_body=new_body,
+                review_seconds=review_seconds,
+            )
+        return ApprovalDecision(approved=False, review_seconds=review_seconds)
+
+    return ApprovalDecision(approved=False, review_seconds=review_seconds)
+
+
+def _print_summary(results: list[TriageResult]) -> None:
+    for result in results:
+        action_kinds = [a.kind for a in result.actions]
+        error_note = " classification_error=True" if result.classification_error else ""
+        print(
+            f"{result.email_id}: label={result.label}{error_note} "
+            f"actions={action_kinds} "
+            f"approved={result.approved} "
+            f"skipped={result.skipped} "
+            f"executed={len(result.executed)} "
+            f"errors={result.errors}"
+        )
+        if result.classification_error:
+            print(
+                "  ⚠ LLM classification failed or was invalid — "
+                f"email treated as {result.label} (no writes unless approved)"
+            )
+        for action in result.actions:
+            print(f"  - {action.kind}: {action.rationale}")
+            if action.kind == "send_reply":
+                print(
+                    f"    to={action.payload.get('to')} "
+                    f"subject={action.payload.get('subject')}"
+                )
+            elif action.kind == "send_alert":
+                print(f"    channel={action.payload.get('channel')}")
+            elif action.kind == "create_lead":
+                print(f"    lead={action.payload.get('email')}")
+    print(f"\n{len(results)} emails processed.")
+
+
+def _print_metrics(metrics: RunMetrics, *, mode: str) -> None:
+    print("\n" + "=" * 60)
+    print("Run metrics")
+    print("=" * 60)
+    print(f"  emails processed     : {metrics.emails}")
+    print(f"  by label             : {metrics.by_label}")
+    print(f"  actions proposed     : {metrics.actions_proposed}")
+    if mode == "approve":
+        print(f"  actions approved     : {metrics.actions_approved}")
+        print(f"  actions skipped      : {metrics.actions_skipped}")
+        print(f"  actions executed     : {metrics.actions_executed}")
+        if metrics.approval_rate is not None:
+            print(f"  approval rate        : {metrics.approval_rate:.0%}")
+    print(f"  classification errors: {metrics.classification_errors}")
+
+    if metrics.classification is not None:
+        c = metrics.classification
+        print("  [Classification]")
+        print(f"    accuracy             : {c.accuracy:.0%}")
+        print(f"    spam false negatives : {c.spam_false_negatives}")
+        print(f"    spam false positives : {c.spam_false_positives}")
+        if c.prompt_injection_caught is not None:
+            print(f"    prompt-injection caught: {c.prompt_injection_caught}")
+
+    if metrics.gate is not None:
+        g = metrics.gate
+        print("  [Human gate]")
+        if g.approval_rate is not None:
+            print(f"    approval rate        : {g.approval_rate:.0%}")
+        if g.approval_without_edit_rate is not None:
+            print(f"    approval w/o edit    : {g.approval_without_edit_rate:.0%}")
+        if g.denial_rate_by_kind:
+            print(f"    denial by kind       : {g.denial_rate_by_kind}")
+        if g.avg_review_seconds is not None:
+            print(f"    avg review seconds   : {g.avg_review_seconds:.2f}")
+
+    if metrics.safety is not None:
+        s = metrics.safety
+        print("  [Safety]")
+        print(f"    write token accesses : {s.write_token_accesses}")
+        print(f"    writes on spam       : {s.writes_on_spam}")
+        print(f"    unapproved writes    : {s.unapproved_writes}")
+        print(f"    invariants           : {'OK' if s.invariants_ok else 'FAIL'}")
+
+    if metrics.funnel is not None:
+        f = metrics.funnel
+        print("  [Funnel]")
+        if f.execution_success_rate is not None:
+            print(f"    execution success    : {f.execution_success_rate:.0%}")
+        if f.partial_completion:
+            print(f"    partial completion   : {f.partial_completion}")
+        if f.errors_by_kind:
+            print(f"    errors by kind       : {f.errors_by_kind}")
+
+    print("  [Draft quality]")
+    if metrics.draft_pass_rate is not None:
+        print(
+            f"    draft pass rate      : {metrics.draft_pass_rate:.0%} "
+            "(non-empty, label-relevant, safe, length)"
+        )
+    if metrics.draft_source_counts:
+        print(f"    draft sources        : {metrics.draft_source_counts}")
+    print("=" * 60)
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        print(f"Missing required environment variable: {name}", file=sys.stderr)
+        sys.exit(1)
+    return value
+
+
+def main(argv: list[str] | None = None) -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="Inbox Triage skill worker")
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help="Enable per-action approval and execute approved writes",
+    )
+    args = parser.parse_args(argv)
+
+    base_url = _require_env("API_BASE_URL")
+    read_token = _require_env("READ_TOKEN")
+    try:
+        provider = _llm_provider()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    if provider == "groq":
+        _require_env("GROQ_API_KEY")
+    else:
+        _require_env("ANTHROPIC_API_KEY")
+
+    mode: Literal["propose", "approve"] = "approve" if args.approve else "propose"
+    write_token_provider: Callable[[], str] | None = None
+    approver = None
+    write_token_accesses = 0
+
+    if mode == "approve":
+
+        def write_token_provider() -> str:
+            nonlocal write_token_accesses
+            write_token_accesses += 1
+            token = os.environ.get("WRITE_TOKEN")
+            if not token:
+                raise RuntimeError("WRITE_TOKEN is not set")
+            return token
+
+        approver = _cli_approver
+
+    read_client = TriageClient(base_url, read_token=read_token)
+    try:
+        results = triage_inbox(
+            read_client,
+            approver,
+            mode=mode,
+            base_url=base_url,
+            write_token_provider=write_token_provider,
+        )
+    finally:
+        read_client.close()
+
+    if not results:
+        print("0 emails processed.")
+        return
+
+    gold = load_expected_labels()
+    _print_summary(results)
+    _print_metrics(
+        compute_run_metrics(
+            results,
+            mode=mode,
+            write_token_accesses=write_token_accesses,
+            gold=gold,
+        ),
+        mode=mode,
+    )
+
+
+if __name__ == "__main__":
+    main()
