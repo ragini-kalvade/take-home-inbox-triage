@@ -30,6 +30,8 @@ ROUTING: dict[str, list[str]] = {
 # Action kinds your plan may contain.
 ACTION_KINDS = ("send_reply", "send_alert", "create_lead")
 
+HTTP_TIMEOUT = 30.0
+
 REPLY_TEMPLATES: dict[str, str] = {
     "billing": (
         "Thank you for reaching out. We have received your billing inquiry and "
@@ -57,6 +59,93 @@ class ProposedAction:
     rationale: str = ""
     draft_source: str = "template"
     draft_model: str | None = None
+
+
+class TriageClient:
+    """Thin wrapper over the mock API."""
+
+    def __init__(self, base_url: str, read_token: str, write_token: str | None = None):
+        self.base_url = base_url.rstrip("/")
+        self.read_token = read_token
+        self.write_token = write_token
+        self._client = httpx.Client(timeout=HTTP_TIMEOUT)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> TriageClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def _headers(self, token: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}"}
+
+    def get_inbox(self) -> list[dict]:
+        response = self._client.get(
+            f"{self.base_url}/inbox",
+            headers=self._headers(self.read_token),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _require_write_token(self) -> str:
+        if not self.write_token:
+            raise RuntimeError("Write scope required but no write token is configured")
+        return self.write_token
+
+    def send_reply(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        in_reply_to: str | None = None,
+    ) -> dict:
+        token = self._require_write_token()
+        payload: dict = {"to": to, "subject": subject, "body": body}
+        if in_reply_to is not None:
+            payload["in_reply_to"] = in_reply_to
+        response = self._client.post(
+            f"{self.base_url}/mail/send",
+            headers=self._headers(token),
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def send_alert(self, *, channel: str, message: str) -> dict:
+        token = self._require_write_token()
+        response = self._client.post(
+            f"{self.base_url}/slack/alert",
+            headers=self._headers(token),
+            json={"channel": channel, "message": message},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def create_lead(
+        self,
+        *,
+        name: str,
+        email: str,
+        company: str | None = None,
+        summary: str | None = None,
+    ) -> dict:
+        token = self._require_write_token()
+        payload: dict = {"name": name, "email": email}
+        if company is not None:
+            payload["company"] = company
+        if summary is not None:
+            payload["summary"] = summary
+        response = self._client.post(
+            f"{self.base_url}/crm/lead",
+            headers=self._headers(token),
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _email_field(email: dict, field: str) -> str:
