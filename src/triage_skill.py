@@ -560,7 +560,24 @@ def compute_classification_metrics(
 
 
 def _edit_distance(original: str, edited: str) -> int:
-    return abs(len(edited) - len(original))
+    """Return Levenshtein edit distance between two reply bodies."""
+    if original == edited:
+        return 0
+    if not original:
+        return len(edited)
+    if not edited:
+        return len(original)
+
+    previous = list(range(len(edited) + 1))
+    for i, original_char in enumerate(original, 1):
+        current = [i]
+        for j, edited_char in enumerate(edited, 1):
+            insert_cost = current[j - 1] + 1
+            delete_cost = previous[j] + 1
+            replace_cost = previous[j - 1] + (original_char != edited_char)
+            current.append(min(insert_cost, delete_cost, replace_cost))
+        previous = current
+    return previous[-1]
 
 
 def compute_gate_metrics(results: list[TriageResult]) -> GateMetrics:

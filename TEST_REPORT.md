@@ -15,10 +15,10 @@ make test
 
 ## Result
 
-`44 passed` — full run captured below (Python 3.14.2, pytest 9.1.1).
+`45 passed` — full run captured below (Python 3.14.2, pytest 9.1.1).
 
 ```
-============================== 44 passed in 0.69s ==============================
+============================== 45 passed in 0.46s ==============================
 ```
 
 ## What each group of tests proves

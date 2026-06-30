@@ -20,6 +20,7 @@ from src.triage_skill import (
     TriageResult,
     _classify,
     _coerce_approval,
+    _edit_distance,
     _llm_provider,
     _parse_label_from_text,
     _reply_body,
@@ -521,6 +522,11 @@ def test_gate_metrics_approval_without_edit():
     ]
     g = compute_gate_metrics(results)
     assert g.approval_without_edit_rate == 1.0
+
+
+def test_edit_distance_counts_same_length_replacements():
+    assert _edit_distance("abc", "xyz") == 3
+    assert _edit_distance("kitten", "sitting") == 3
 
 
 def test_safety_invariants_ok():
