@@ -1015,15 +1015,17 @@ def _cli_approver(email: dict, action: ProposedAction) -> ApprovalDecision:
         print(f"  Lead: {action.payload.get('name')} <{action.payload.get('email')}>")
         if action.payload.get("company"):
             print(f"  Company: {action.payload.get('company')}")
+    # Measure review time at each return point, after ALL prompts have been
+    # answered — the edit path below adds a second prompt, and the time spent
+    # typing the edited reply must count toward review_seconds too.
     started = time.perf_counter()
     try:
         answer = input("  Approve this action? [y/N/e]: ").strip().lower()
     except EOFError:
         answer = ""
-    review_seconds = time.perf_counter() - started
 
     if answer in ("y", "yes"):
-        return ApprovalDecision(approved=True, review_seconds=review_seconds)
+        return ApprovalDecision(approved=True, review_seconds=time.perf_counter() - started)
 
     if answer == "e" and action.kind == "send_reply":
         try:
@@ -1034,11 +1036,11 @@ def _cli_approver(email: dict, action: ProposedAction) -> ApprovalDecision:
             return ApprovalDecision(
                 approved=True,
                 final_body=new_body,
-                review_seconds=review_seconds,
+                review_seconds=time.perf_counter() - started,
             )
-        return ApprovalDecision(approved=False, review_seconds=review_seconds)
+        return ApprovalDecision(approved=False, review_seconds=time.perf_counter() - started)
 
-    return ApprovalDecision(approved=False, review_seconds=review_seconds)
+    return ApprovalDecision(approved=False, review_seconds=time.perf_counter() - started)
 
 
 def _print_summary(results: list[TriageResult]) -> None:
