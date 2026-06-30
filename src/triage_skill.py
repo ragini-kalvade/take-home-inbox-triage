@@ -27,7 +27,7 @@ LABELS = ("billing", "bug_report", "sales_lead", "spam")
 # Which actions each classification implies. `spam` implies none.
 ROUTING: dict[str, list[str]] = {
     "billing": ["send_reply"],
-    "bug_report": ["send_reply", "send_alert"],
+    "bug_report": ["send_alert"],
     "sales_lead": ["send_reply", "create_lead"],
     "spam": [],
 }
@@ -642,15 +642,6 @@ def compute_funnel_metrics(results: list[TriageResult]) -> FunnelMetrics:
         approved_set = set(result.approved)
         skipped_set = set(result.skipped)
 
-        if result.label == "bug_report":
-            if "send_reply" in approved_set and "send_alert" in skipped_set:
-                partial_completion["reply_without_alert"] = (
-                    partial_completion.get("reply_without_alert", 0) + 1
-                )
-            if "send_alert" in approved_set and "send_reply" in skipped_set:
-                partial_completion["alert_without_reply"] = (
-                    partial_completion.get("alert_without_reply", 0) + 1
-                )
         if result.label == "sales_lead":
             if "send_reply" in approved_set and "create_lead" in skipped_set:
                 partial_completion["reply_without_lead"] = (

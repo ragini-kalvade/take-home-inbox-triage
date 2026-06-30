@@ -25,7 +25,7 @@ make test
 
 | Requirement | Tests |
 |---|---|
-| **Correct routing** (billing→reply, bug→reply+alert, sales→reply+lead, spam→none) | `test_plan_actions_*` |
+| **Correct routing** (billing→reply, bug→alert, sales→reply+lead, spam→none) | `test_plan_actions_*` |
 | **Human-in-the-loop gate** — nothing executes without approval | `test_execute_denied_*`, `test_triage_inbox_denied_*`, `test_triage_inbox_propose_mode_*` |
 | **Least privilege** — spam/denied paths never request the write token | `test_triage_inbox_spam_*`, `test_triage_client_write_without_token` |
 | **Approved writes dispatch** to the right endpoint | `test_execute_approved_*`, `test_triage_inbox_approved_*` |

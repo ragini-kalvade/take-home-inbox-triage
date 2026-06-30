@@ -114,7 +114,7 @@ The skill **drafts/proposes** replies locally using safe templates. The mock sen
 
 1. **Ingest** — fetches all emails from the mock inbox (`GET /inbox`).
 2. **Classify** — uses the configured LLM provider to assign each email one label: `billing`, `bug_report`, `sales_lead`, or `spam`.
-3. **Plan** — deterministic Python routing decides what to do (the LLM never picks endpoints). Bug reports trigger a customer acknowledgment **and** an engineering alert; spam is logged and dropped with no reply template.
+3. **Plan** — deterministic Python routing decides what to do (the LLM never picks endpoints). Bug reports trigger an engineering alert; spam is logged and dropped with no reply template.
 4. **Propose or approve** — by default the skill prints proposed actions only. With `--approve`, you confirm each action individually before anything is sent.
 5. **Execute** — approved actions call the write API (mail, Slack alert, or CRM lead).
 

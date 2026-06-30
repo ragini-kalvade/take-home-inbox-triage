@@ -81,14 +81,10 @@ def test_plan_actions_billing():
 
 def test_plan_actions_bug_report():
     actions = plan_actions("bug_report", BUG_EMAIL)
-    assert len(actions) == 2
-    assert actions[0].kind == "send_reply"
-    assert actions[0].payload["to"] == BUG_EMAIL["from"]
-    assert actions[0].payload["in_reply_to"] == BUG_EMAIL["id"]
-    assert "engineering" in actions[0].payload["body"].lower()
-    assert actions[1].kind == "send_alert"
-    assert actions[1].payload["channel"] == "#engineering"
-    assert BUG_EMAIL["subject"] in actions[1].payload["message"]
+    assert len(actions) == 1
+    assert actions[0].kind == "send_alert"
+    assert actions[0].payload["channel"] == "#engineering"
+    assert BUG_EMAIL["subject"] in actions[0].payload["message"]
 
 
 def test_plan_actions_sales_lead():
@@ -446,18 +442,17 @@ def test_compute_run_metrics_approve_mode():
             email_id="e-002",
             label="bug_report",
             actions=plan_actions("bug_report", BUG_EMAIL),
-            skipped=["send_reply", "send_alert"],
+            skipped=["send_alert"],
             outcomes=[
-                ActionOutcome(kind="send_reply", review_seconds=0.5),
                 ActionOutcome(kind="send_alert", review_seconds=0.5),
             ],
         ),
     ]
     metrics = compute_run_metrics(results, mode="approve", write_token_accesses=1)
-    assert metrics.actions_proposed == 3
+    assert metrics.actions_proposed == 2
     assert metrics.actions_approved == 1
-    assert metrics.actions_skipped == 2
-    assert metrics.approval_rate == pytest.approx(1 / 3)
+    assert metrics.actions_skipped == 1
+    assert metrics.approval_rate == pytest.approx(1 / 2)
     assert metrics.draft_pass_rate == 1.0
     assert metrics.safety is not None
     assert metrics.safety.invariants_ok
@@ -553,14 +548,14 @@ def test_safety_invariants_fail_spam_write():
 def test_funnel_partial_completion():
     results = [
         TriageResult(
-            email_id="e-002",
-            label="bug_report",
+            email_id="e-003",
+            label="sales_lead",
             approved=["send_reply"],
-            skipped=["send_alert"],
+            skipped=["create_lead"],
         ),
     ]
     f = compute_funnel_metrics(results)
-    assert f.partial_completion.get("reply_without_alert") == 1
+    assert f.partial_completion.get("reply_without_lead") == 1
 
 
 def test_draft_source_on_plan_actions():
