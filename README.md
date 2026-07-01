@@ -177,3 +177,6 @@ If the LLM fails or returns invalid output, the email is classified as `spam` wi
 ### Design decision I'm proudest of
 
 I separated proposed actions from executed actions. The LLM classifies; deterministic code enforces routing, template replies, per-action approval, and credential use. `WRITE_TOKEN` is accessed only inside `execute` after approval — spam and denied actions never touch it.
+
+### Loom Video 
+https://www.loom.com/share/b5e4490bc8f249f6a6b083a5480d655a 
